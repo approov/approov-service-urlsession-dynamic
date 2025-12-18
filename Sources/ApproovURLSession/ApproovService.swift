@@ -97,6 +97,9 @@ public class ApproovService {
     // Approov token custom prefix: any prefix to be added such as "Bearer "
     private static var approovTokenPrefix = ""
 
+    // Approov TraceID optional header
+    private static var approovTraceIDHeader: String? = "Approov-TraceID"
+
     // the target for request processing interceptorExtensions
     private static var interceptorExtensions: ApproovInterceptorExtensions? = nil
 
@@ -109,6 +112,33 @@ public class ApproovService {
 
     // map of URL regexs that should be excluded from any Approov protection, mapped to the compiled Pattern
     private static var exclusionURLRegexs: Dictionary<String, NSRegularExpression> = Dictionary()
+
+
+    
+    /**
+     * Gets the last ARC (Attestation Response Code) code.
+     *
+     * @return String of the last ARC or empty string if there was none
+     */
+    public static func getLastARC() -> String {
+        // We have to get the current config and obtain one protected API endpoint at least
+        // get the dynamic pins from Approov
+        guard let approovPins = Approov.getPins("public-key-sha256") else {
+            os_log("ApproovService: no host pinning information available", type: .error)
+            return ""
+        }
+        // The approovPins contains a map of hostnames to pin strings. We need to skip the '*' entry (Managed Trust Roots),
+        // and use another hostname if available.
+        if let hostname = approovPins.keys.first(where: { $0 != "*" }) {
+            let result = Approov.fetchTokenAndWait(hostname)
+            // Check if a token was fetched successfully and return its arc code
+            if result.token.count > 0 {
+                return result.arc
+            }
+        }
+        os_log("ApproovService: ARC code unavailable", type: .info)
+        return ""
+    }
 
     /**
      * Initializes the SDK with the config obtained using `approov sdk -getConfigString` or
@@ -203,6 +233,30 @@ public class ApproovService {
             approovTokenHeader = header
             approovTokenPrefix = prefix
             os_log("ApproovService: setApproovHeader: %@", type: .debug, header, prefix)
+        }
+    }
+
+    /**
+     * Sets the header name used to provide the optional Approov TraceID debug value. Passing
+     * nil disables the TraceID header.
+     *
+     * @param header is the header to place the Approov TraceID on, or nil to disable it
+     */
+    public static func setApproovTraceIDHeader(header: String?) {
+        stateQueue.sync {
+            approovTraceIDHeader = header
+            os_log("ApproovService: setApproovTraceIDHeader: %@", type: .debug, header ?? "nil")
+        }
+    }
+
+    /**
+     * Gets the header that is used to add the optional Approov TraceID debug value.
+     *
+     * @return the name of the header used for the Approov TraceID, or nil if disabled
+     */
+    public static func getApproovTraceIDHeader() -> String? {
+        return stateQueue.sync {
+            return approovTraceIDHeader
         }
     }
 
@@ -444,7 +498,7 @@ public class ApproovService {
      * the returned token should NEVER be cached by your app, you should call this function when
      * it is needed.
      *
-     * @param url is the URL giving the domain for the token fetch
+     * @param url is the full URL (including path) for the token fetch
      * @return String of the fetched token
      * @throws ApproovError if there was a problem
      */
@@ -693,7 +747,6 @@ public class ApproovService {
         let approovResult = Approov.fetchTokenAndWait(request.url!.absoluteString)
         let hostname = hostnameFromURL(url: request.url!)
         os_log("ApproovService: updateRequest %@: %@", type: .info, hostname, approovResult.loggableToken())
-
         // log if a configuration update is received and call fetchConfig to clear the update state
         if approovResult.isConfigChanged {
             Approov.fetchConfig()
@@ -705,6 +758,8 @@ public class ApproovService {
         var hasChanges = false
         var setTokenHeaderKey: String?
         var setTokenHeaderValue: String?
+        var setTraceIDHeaderKey: String?
+        var setTraceIDHeaderValue: String?
         // All paths through this switch statement must set response.decision
         switch approovResult.status {
         case ApproovTokenFetchStatus.success:
@@ -719,6 +774,14 @@ public class ApproovService {
             hasChanges = true
             setTokenHeaderKey = tokenHeader
             setTokenHeaderValue = tokenPrefix + approovResult.token
+            let traceID = approovResult.traceID
+            if let traceHeader = stateQueue.sync(execute: { approovTraceIDHeader }),
+               !traceHeader.isEmpty,
+               !traceID.isEmpty {
+                hasChanges = true
+                setTraceIDHeaderKey = traceHeader
+                setTraceIDHeaderValue = traceID
+            }
         case ApproovTokenFetchStatus.noNetwork,
             ApproovTokenFetchStatus.poorNetwork,
             ApproovTokenFetchStatus.mitmDetected:
@@ -887,6 +950,11 @@ public class ApproovService {
                let tokenHeaderValue = setTokenHeaderValue {
                 response.request.setValue(tokenHeaderValue, forHTTPHeaderField: tokenHeaderKey)
                 changes.setTokenHeaderKey(tokenHeaderKey);
+            }
+            if let traceIDHeaderKey = setTraceIDHeaderKey,
+               let traceIDHeaderValue = setTraceIDHeaderValue {
+                response.request.setValue(traceIDHeaderValue, forHTTPHeaderField: traceIDHeaderKey)
+                changes.setTraceIDHeaderKey(traceIDHeaderKey)
             }
             if (!setSubstitutionHeaders.isEmpty) {
                 for (header, value) in setSubstitutionHeaders {

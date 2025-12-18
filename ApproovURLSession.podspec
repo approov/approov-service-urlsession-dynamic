@@ -8,7 +8,7 @@ Pod::Spec.new do |s|
   s.homepage     = "https://approov.io"
   s.license      = { :type => "Commercial", :file => "LICENSE" }
   s.authors      = { "CriticalBlue, Ltd." => "support@approov.io" }
-  s.source       = { :git => "https://github.com/approov/approov-service-urlsession", :tag => s.version }
+  s.source       = { :git => "https://github.com/approov/approov-service-urlsession-dynamic", :tag => s.version }
   
   # Supported platforms
   s.ios.deployment_target = '11.0'
